@@ -117,6 +117,10 @@ _ssl_context_cache: Dict[
     Tuple[Optional[str], Optional[str], Optional[str]], ssl.SSLContext
 ] = {}
 
+# Shared session for requests with ssl_verify=False (e.g. self-signed certs).
+# Lazily created on first use to avoid creating connectors per-request.
+_shared_session_no_ssl: Optional[ClientSession] = None
+
 
 def _create_ssl_context(
     cafile: Optional[str],
@@ -832,6 +836,8 @@ class AsyncHTTPHandler:
         - SSLContext: custom SSL context
         - False: disable SSL verification
         """
+        global _shared_session_no_ssl
+
         from litellm.llms.custom_httpx.aiohttp_transport import LiteLLMAiohttpTransport
         from litellm.secret_managers.main import str_to_bool
 
@@ -848,12 +854,47 @@ class AsyncHTTPHandler:
 
         verbose_logger.debug("Creating AiohttpTransport...")
 
-        # Use shared session if provided and valid
-        if shared_session is not None and not shared_session.closed:
+        # Use shared session if provided, valid, and SSL settings are compatible.
+        # The shared session is created with default SSL (verification on), so we cannot
+        # reuse it when ssl_verify is explicitly False (e.g. self-signed certs).
+        if (
+            shared_session is not None
+            and not shared_session.closed
+            and ssl_verify is not False
+        ):
             verbose_logger.debug(
                 f"SHARED SESSION: Reusing existing ClientSession (ID: {id(shared_session)})"
             )
             return LiteLLMAiohttpTransport(client=shared_session)
+
+        # For ssl_verify=False, use a dedicated shared session (lazily created)
+        # to avoid creating a new connector per request.
+        if ssl_verify is False:
+            if _shared_session_no_ssl is None or _shared_session_no_ssl.closed:
+                verbose_logger.debug(
+                    "SHARED SESSION (no-SSL): Creating new ClientSession with ssl=False"
+                )
+                transport_connector_kwargs = {
+                    "keepalive_timeout": AIOHTTP_KEEPALIVE_TIMEOUT,
+                    "ttl_dns_cache": AIOHTTP_TTL_DNS_CACHE,
+                    "enable_cleanup_closed": True,
+                    **connector_kwargs,
+                }
+                if AIOHTTP_CONNECTOR_LIMIT > 0:
+                    transport_connector_kwargs["limit"] = AIOHTTP_CONNECTOR_LIMIT
+                if AIOHTTP_CONNECTOR_LIMIT_PER_HOST > 0:
+                    transport_connector_kwargs[
+                        "limit_per_host"
+                    ] = AIOHTTP_CONNECTOR_LIMIT_PER_HOST
+                _shared_session_no_ssl = ClientSession(
+                    connector=TCPConnector(**transport_connector_kwargs),
+                    trust_env=trust_env,
+                )
+            else:
+                verbose_logger.debug(
+                    f"SHARED SESSION (no-SSL): Reusing existing ClientSession (ID: {id(_shared_session_no_ssl)})"
+                )
+            return LiteLLMAiohttpTransport(client=_shared_session_no_ssl)
 
         # Create new session only if none provided or existing one is invalid
         verbose_logger.debug(
