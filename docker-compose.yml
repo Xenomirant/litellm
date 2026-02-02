@@ -4,16 +4,19 @@ services:
       context: .
       args:
         target: runtime
-    image: docker.litellm.ai/berriai/litellm:main-stable
-    #########################################
-    ## Uncomment these lines to start proxy with a config.yaml file ##
-    # volumes:
-    #  - ./config.yaml:/app/config.yaml
-    # command:
-    #  - "--config=/app/config.yaml"
-    ##############################################
+    # Build from repo (your changes). Rebuild after code changes: docker compose up -d --build
+    # To use upstream image instead, set to: docker.litellm.ai/berriai/litellm:main-stable
+    image: litellm:local
+    volumes:
+     - ./config.yaml:/app/config.yaml
+     - ./model_prices_and_context_window.json:/app/model_prices_and_context_window.json
+    # Allow container to reach host (e.g. SSH tunnel on port 8000)
+    extra_hosts:
+     - "host.docker.internal:host-gateway"
+    command:
+     - "--config=/app/config.yaml"
     ports:
-      - "4000:4000" # Map the container port to the host, change the host port if necessary
+      - "4000:4000" # Proxy API; port 8000 stays on host for your SSH tunnel to vLLM
     environment:
       DATABASE_URL: "postgresql://llmproxy:dbpassword9090@db:5432/litellm"
       STORE_MODEL_IN_DB: "True" # allows adding models to proxy via UI
